@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from dateutil.parser import parse as parse_date
 import json
 import os
-from .models import Event, AdCampaign, AdTemplate, SMSCampaign, Customer, UserSegment
+from .models import Event, AdCampaign, AdTemplate, SMSCampaign, SMSSent, Customer, UserSegment
 
 HOTEL_LOCATION = "New york city, USA"
 
@@ -219,23 +219,17 @@ Return ONLY valid JSON, no markdown or explanation."""
     return template
 
 
-def generate_sms_for_existing_customer(customer: Customer, db: Session) -> SMSCampaign:
-    prompt = f"""You are a hospitality CRM specialist. Write a personalised SMS for a returning customer.
-Keep it under 160 characters. Be warm, personal, and include a compelling offer.
-
-Customer Profile:
-- Name: {customer.first_name}
-- Loyalty Member: {customer.is_loyalty_member}
-- Room Preference: {customer.room_preference or 'N/A'}
-- Dietary Requirements: {customer.dietary_requirements or 'N/A'}
-- Nationality: {customer.nationality or 'N/A'}
+def generate_sms_template_existing(db: Session) -> SMSCampaign:
+    prompt = """You are a hospitality CRM specialist. Write a base SMS template for returning/existing customers.
+Be warm, personal, and include a compelling loyalty offer.
+Use {first_name} as a placeholder. Keep it under 130 characters.
 
 Return a single JSON object:
-{{
-  "message_body": "the SMS text (max 160 chars)",
-  "discount_code": "a loyalty reward code e.g. LOYALTY20",
+{
+  "message_body": "the SMS template with {first_name} placeholder",
+  "discount_code": "e.g. LOYALTY20",
   "landing_page_url": "https://example.com/returning-offer"
-}}
+}
 
 Return ONLY valid JSON, no markdown or explanation."""
 
@@ -247,43 +241,28 @@ Return ONLY valid JSON, no markdown or explanation."""
     )
     data = _parse_groq_json(response.choices[0].message.content)
 
-    sms = SMSCampaign(
-        customer_id=customer.id,
-        ad_campaign_id=None,
+    template = SMSCampaign(
         segment=UserSegment.EXISTING_CUSTOMER,
         message_body=data["message_body"][:160],
         discount_code=data.get("discount_code"),
         landing_page_url=data.get("landing_page_url")
     )
-    db.add(sms)
+    db.add(template)
     db.commit()
-    db.refresh(sms)
-    return sms
+    db.refresh(template)
+    return template
 
 
-def generate_sms_for_lead(customer: Customer, db: Session) -> SMSCampaign:
-    campaign = customer.origin_campaign
-    event = campaign.event if campaign else None
-
-    prompt = f"""You are a hospitality sales specialist. Write a follow-up SMS for a new lead captured from a Meta Ad.
-Keep it under 160 characters. Create urgency and drive them to book.
-
-Lead Info:
-- Name: {customer.first_name}
-- Phone: {customer.phone_number}
-
-Originating Ad Campaign:
-- Headline: {campaign.headline if campaign else 'N/A'}
-- Event: {event.title if event else 'N/A'}
-- Event Location: {event.location_name if event else 'N/A'}
-- Event Date: {event.start_time if event else 'N/A'}
+def generate_sms_template_lead(db: Session) -> SMSCampaign:
+    prompt = """You are a hospitality sales specialist. Write a base SMS template for new leads captured from Meta Ads.
+Create urgency and drive them to book. Use {first_name} as a placeholder. Keep it under 130 characters.
 
 Return a single JSON object:
-{{
-  "message_body": "the SMS text (max 160 chars)",
-  "discount_code": "a welcome offer code e.g. WELCOME15",
+{
+  "message_body": "the SMS template with {first_name} placeholder",
+  "discount_code": "e.g. WELCOME15",
   "landing_page_url": "https://example.com/book-now"
-}}
+}
 
 Return ONLY valid JSON, no markdown or explanation."""
 
@@ -295,15 +274,39 @@ Return ONLY valid JSON, no markdown or explanation."""
     )
     data = _parse_groq_json(response.choices[0].message.content)
 
-    sms = SMSCampaign(
-        customer_id=customer.id,
-        ad_campaign_id=campaign.id if campaign else None,
+    template = SMSCampaign(
         segment=UserSegment.NEW_LEAD,
         message_body=data["message_body"][:160],
         discount_code=data.get("discount_code"),
         landing_page_url=data.get("landing_page_url")
     )
-    db.add(sms)
+    db.add(template)
     db.commit()
-    db.refresh(sms)
-    return sms
+    db.refresh(template)
+    return template
+
+
+def bulk_send_sms(template: SMSCampaign, db: Session) -> dict:
+    segment_filter = (
+        Customer.origin_ad_campaign_id.isnot(None)
+        if template.segment == UserSegment.NEW_LEAD
+        else Customer.origin_ad_campaign_id.is_(None)
+    )
+    customers = db.query(Customer).filter(segment_filter).all()
+
+    sent, skipped = [], []
+    for customer in customers:
+        try:
+            personalized = template.message_body.replace("{first_name}", customer.first_name)
+            db.add(SMSSent(
+                sms_campaign_id=template.id,
+                customer_id=customer.id,
+                message_body=personalized[:160],
+                sent_at=datetime.utcnow()
+            ))
+            sent.append(customer.id)
+        except Exception as e:
+            skipped.append({"customer_id": customer.id, "reason": str(e)})
+
+    db.commit()
+    return {"sent": len(sent), "skipped": skipped}

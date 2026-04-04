@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from .db import get_db
-from .models import User, Event, AdCampaign, Customer
-from .schemas import SignIn, Token, EventSearchRequest, EventResponse, AdCampaignResponse, AdTemplateResponse, SMSCampaignResponse
+from .models import User, Event, AdCampaign, Customer, SMSCampaign
+from .schemas import SignIn, Token, EventSearchRequest, EventResponse, AdCampaignResponse, AdTemplateResponse, SMSCampaignResponse, SMSTemplateResponse
 from .auth import verify_password, create_access_token
-from .service import search_and_save_events, generate_campaigns_for_event, generate_ad_template, generate_sms_for_existing_customer, generate_sms_for_lead
+from .service import search_and_save_events, generate_campaigns_for_event, generate_ad_template, generate_sms_template_existing, generate_sms_template_lead, bulk_send_sms
 import csv
 import io
 from datetime import date
@@ -48,6 +48,30 @@ def generate_template(campaign_id: str, db: Session = Depends(get_db)):
         return generate_ad_template(campaign, db)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating template: {str(e)}")
+
+@router.post("/sms-templates/existing", response_model=SMSTemplateResponse)
+def create_sms_template_existing(db: Session = Depends(get_db)):
+    try:
+        return generate_sms_template_existing(db)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating SMS template: {str(e)}")
+
+@router.post("/sms-templates/lead", response_model=SMSTemplateResponse)
+def create_sms_template_lead(db: Session = Depends(get_db)):
+    try:
+        return generate_sms_template_lead(db)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating SMS template: {str(e)}")
+
+@router.post("/sms-templates/{template_id}/send")
+def send_bulk_sms(template_id: str, db: Session = Depends(get_db)):
+    template = db.query(SMSCampaign).filter(SMSCampaign.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SMS template not found")
+    try:
+        return bulk_send_sms(template, db)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error sending bulk SMS: {str(e)}")
 
 @router.get("/customers")
 def list_customers(db: Session = Depends(get_db)):
@@ -102,23 +126,3 @@ def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
 
     db.commit()
     return {"created": created, "updated": updated, "skipped": skipped}
-
-@router.post("/customers/{customer_id}/sms/existing", response_model=SMSCampaignResponse)
-def sms_existing_customer(customer_id: str, db: Session = Depends(get_db)):
-    customer = db.query(Customer).filter(Customer.id == customer_id).first()
-    if not customer:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
-    try:
-        return generate_sms_for_existing_customer(customer, db)
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating SMS: {str(e)}")
-
-@router.post("/customers/{customer_id}/sms/lead", response_model=SMSCampaignResponse)
-def sms_lead_customer(customer_id: str, db: Session = Depends(get_db)):
-    customer = db.query(Customer).filter(Customer.id == customer_id).first()
-    if not customer:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
-    try:
-        return generate_sms_for_lead(customer, db)
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating SMS: {str(e)}")

@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .db import Base
+from datetime import datetime
 import uuid
 import enum
 
@@ -89,18 +90,32 @@ class SMSCampaign(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     ad_campaign_id = Column(String, ForeignKey("ad_campaigns.id"), nullable=True)
-    customer_id = Column(String, ForeignKey("customers.id"), nullable=True)
     segment = Column(Enum(UserSegment), nullable=False)
     message_body = Column(String(160), nullable=False)
     discount_code = Column(String(50))
     landing_page_url = Column(String)
-    sent_at = Column(DateTime)
-    is_delivered = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
 
     ad_campaign = relationship("AdCampaign")
 
     def __repr__(self):
-        return f"<SMSCampaign(segment='{self.segment}', code='{self.discount_code}')>"
+        return f"<SMSCampaign(segment='{self.segment}')>"
+
+
+class SMSSent(Base):
+    __tablename__ = "sms_sent"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    sms_campaign_id = Column(String, ForeignKey("sms_campaigns.id"), nullable=False)
+    customer_id = Column(String, ForeignKey("customers.id"), nullable=False)
+    message_body = Column(String(160), nullable=False)
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    is_delivered = Column(Boolean, default=False)
+
+    campaign = relationship("SMSCampaign")
+
+    def __repr__(self):
+        return f"<SMSSent(customer='{self.customer_id}', delivered='{self.is_delivered}')>"
 
 
 class Customer(Base):
@@ -119,7 +134,7 @@ class Customer(Base):
     origin_ad_campaign_id = Column(String, ForeignKey("ad_campaigns.id"), nullable=True)
 
     origin_campaign = relationship("AdCampaign")
-    sms_history = relationship("SMSCampaign", backref="customer")
+    sms_history = relationship("SMSSent", backref="customer")
 
     def __repr__(self):
         return f"<Customer(name='{self.first_name}', phone='{self.phone_number}')>"
