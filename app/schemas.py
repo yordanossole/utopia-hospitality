@@ -27,3 +27,17 @@ class EventResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+class AdCampaignResponse(BaseModel):
+    id: str
+    event_id: str
+    headline: Optional[str]
+    body_text: Optional[str]
+    generated_image_url: Optional[str]
+    target_audience: Optional[dict]
+    ai_rationale: Optional[str]
+    status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 import json
 import os
-from .models import Event
+from .models import Event, AdCampaign
 
 # Initialize Groq client only when needed
 groq_client = None
@@ -125,3 +125,58 @@ def search_and_save_events(query: str, location: str, db: Session) -> list[Event
     saved_events = save_events_to_db(structured_events, raw_results, db)
     
     return saved_events
+
+
+def generate_campaigns_for_event(event: Event, db: Session) -> list[AdCampaign]:
+    """Use Groq to generate ad campaign ideas for an event and persist them."""
+    prompt = f"""You are a hospitality marketing expert. Generate 3 distinct Meta ad campaign ideas for the following event.
+
+Event:
+- Title: {event.title}
+- Description: {event.description or 'N/A'}
+- Category: {event.category or 'N/A'}
+- Location: {event.location_name or 'N/A'}
+- Start: {event.start_time or 'N/A'}
+
+Return a JSON array of exactly 3 campaigns with this structure:
+{{
+  "headline": "short punchy headline (max 200 chars)",
+  "body_text": "ad body copy that creates urgency",
+  "target_audience": {{"age_range": "...", "interests": [...], "location": "..."}},
+  "ai_rationale": "why this campaign angle works"
+}}
+
+Return ONLY valid JSON array, no markdown or explanation."""
+
+    response = get_groq_client().chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_tokens=2000
+    )
+
+    content = response.choices[0].message.content.strip()
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+
+    campaigns_data = json.loads(content)
+
+    campaigns = [
+        AdCampaign(
+            event_id=event.id,
+            headline=c.get("headline"),
+            body_text=c.get("body_text"),
+            target_audience=c.get("target_audience"),
+            ai_rationale=c.get("ai_rationale"),
+            status="draft"
+        )
+        for c in campaigns_data
+    ]
+
+    db.add_all(campaigns)
+    db.commit()
+    for c in campaigns:
+        db.refresh(c)
+    return campaigns
