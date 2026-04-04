@@ -26,6 +26,7 @@ class Event(Base):
     # AI Metadata
     source_url = Column(String)
     raw_api_data = Column(JSON)
+    ai_structured_data = Column(JSON)
     
     # Tracking
     created_at = Column(DateTime, server_default=func.now())
@@ -71,7 +72,8 @@ class AdTemplate(Base):
     campaign_id = Column(String, ForeignKey("ad_campaigns.id"), nullable=False)
     primary_text = Column(Text, nullable=False)
     headline = Column(String(255), nullable=False)
-    image_url = Column(String, nullable=False)
+    image_prompt = Column(Text)
+    image_url = Column(String, nullable=True)
     meta_form_id = Column(String(100))
 
     campaign = relationship("AdCampaign", back_populates="templates")
