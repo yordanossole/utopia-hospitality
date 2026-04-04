@@ -1,10 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from .db import get_db
 from .models import User, Event, AdCampaign, Customer
 from .schemas import SignIn, Token, EventSearchRequest, EventResponse, AdCampaignResponse, AdTemplateResponse, SMSCampaignResponse
 from .auth import verify_password, create_access_token
 from .service import search_and_save_events, generate_campaigns_for_event, generate_ad_template, generate_sms_for_existing_customer, generate_sms_for_lead
+import csv
+import io
+from datetime import date
 
 router = APIRouter()
 
@@ -45,6 +48,60 @@ def generate_template(campaign_id: str, db: Session = Depends(get_db)):
         return generate_ad_template(campaign, db)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating template: {str(e)}")
+
+@router.get("/customers")
+def list_customers(db: Session = Depends(get_db)):
+    return db.query(Customer).all()
+
+@router.post("/customers/import")
+def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only CSV files are accepted")
+
+    content = file.file.read().decode("utf-8")
+    reader = csv.DictReader(io.StringIO(content))
+    created, updated, skipped = 0, 0, []
+
+    for row in reader:
+        try:
+            dob_raw = row.get("date_of_birth", "").strip()
+            dob = date.fromisoformat(dob_raw) if dob_raw else None
+            is_loyalty = row.get("is_loyalty_member", "False").strip().lower() in ("true", "1", "yes")
+            campaign_id = row.get("origin_ad_campaign_id", "").strip() or None
+
+            existing = db.query(Customer).filter(Customer.id == row["id"]).first()
+            if existing:
+                existing.first_name = row["first_name"]
+                existing.last_name = row.get("last_name") or None
+                existing.email = row.get("email") or None
+                existing.phone_number = row["phone_number"]
+                existing.date_of_birth = dob
+                existing.nationality = row.get("nationality") or None
+                existing.room_preference = row.get("room_preference") or None
+                existing.dietary_requirements = row.get("dietary_requirements") or None
+                existing.is_loyalty_member = is_loyalty
+                existing.origin_ad_campaign_id = campaign_id
+                updated += 1
+            else:
+                db.add(Customer(
+                    id=row["id"],
+                    first_name=row["first_name"],
+                    last_name=row.get("last_name") or None,
+                    email=row.get("email") or None,
+                    phone_number=row["phone_number"],
+                    date_of_birth=dob,
+                    nationality=row.get("nationality") or None,
+                    room_preference=row.get("room_preference") or None,
+                    dietary_requirements=row.get("dietary_requirements") or None,
+                    is_loyalty_member=is_loyalty,
+                    origin_ad_campaign_id=campaign_id
+                ))
+                created += 1
+        except Exception as e:
+            skipped.append({"row": row.get("id", "unknown"), "reason": str(e)})
+
+    db.commit()
+    return {"created": created, "updated": updated, "skipped": skipped}
 
 @router.post("/customers/{customer_id}/sms/existing", response_model=SMSCampaignResponse)
 def sms_existing_customer(customer_id: str, db: Session = Depends(get_db)):
