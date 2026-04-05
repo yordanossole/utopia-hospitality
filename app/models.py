@@ -52,44 +52,53 @@ class Event(Base):
     def __repr__(self):
         return f"<Event(name='{self.name}', category='{self.category}')>"
 
-class AdCampaign(Base):
-    __tablename__ = "ad_campaigns"
+class Campaign(Base):
+    __tablename__ = "campaigns"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    event_id = Column(String, ForeignKey("events.id"), nullable=False)
-    
-    # AI Creative Content
-    headline = Column(String(200))
-    body_text = Column(Text)
-    generated_image_url = Column(String)
-    
-    # Targeting & Logic
-    target_audience = Column(JSON)
-    ai_rationale = Column(Text)
-    
-    status = Column(String(20), default="draft")
+    name = Column(String(255), nullable=False)
+    goal = Column(String(50), nullable=False)  # bookings | awareness | lead_generation
+    purpose = Column(String(50), nullable=False)  # activation | acquisition | both
+    start_date = Column(String(20), nullable=False)
+    end_date = Column(String(20), nullable=False)
+    status = Column(String(50), default="draft")  # draft | active | paused | completed
+    event_id = Column(String, ForeignKey("events.id"), nullable=True)
+    target = Column(JSON)  # {segmentIds: [], source: []}
     created_at = Column(DateTime, server_default=func.now())
 
-    # Relationships
     event = relationship("Event", back_populates="campaigns")
-    templates = relationship("AdTemplate", back_populates="campaign")
+    ads = relationship("CampaignAd", back_populates="campaign", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<AdCampaign(status='{self.status}', event_id='{self.event_id}')>"
+        return f"<Campaign(name='{self.name}', status='{self.status}')>"
 
 
-class AdTemplate(Base):
-    __tablename__ = "ad_templates"
+class CampaignAd(Base):
+    __tablename__ = "campaign_ads"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    campaign_id = Column(String, ForeignKey("ad_campaigns.id"), nullable=False)
-    primary_text = Column(Text, nullable=False)
-    headline = Column(String(255), nullable=False)
+    campaign_id = Column(String, ForeignKey("campaigns.id"), nullable=False)
+    purpose = Column(String(50), nullable=False)  # activation | acquisition
+    channel = Column(String(50), nullable=False)  # sms | email | meta | google
+    title = Column(String(255))
+    message = Column(Text, nullable=False)
+    status = Column(String(50), default="draft")  # draft | running | paused
+    budget = Column(Float)  # only for meta/google
+    leads_captured = Column(Integer, default=0)  # acquisition metric
+    sent_count = Column(Integer, default=0)  # activation metric
+    
+    # Meta ad specific fields
+    target_audience = Column(JSON)
+    ai_rationale = Column(Text)
     image_prompt = Column(Text)
-    image_url = Column(String, nullable=True)
-    meta_form_id = Column(String(100))
+    image_url = Column(String)
+    
+    created_at = Column(DateTime, server_default=func.now())
 
-    campaign = relationship("AdCampaign", back_populates="templates")
+    campaign = relationship("Campaign", back_populates="ads")
+
+    def __repr__(self):
+        return f"<CampaignAd(channel='{self.channel}', purpose='{self.purpose}')>"
 
 
 class UserSegment(enum.Enum):
@@ -101,14 +110,14 @@ class SMSCampaign(Base):
     __tablename__ = "sms_campaigns"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    ad_campaign_id = Column(String, ForeignKey("ad_campaigns.id"), nullable=True)
+    campaign_id = Column(String, ForeignKey("campaigns.id"), nullable=True)
     segment = Column(Enum(UserSegment), nullable=False)
     message_body = Column(String(160), nullable=False)
     discount_code = Column(String(50))
     landing_page_url = Column(String)
     created_at = Column(DateTime, server_default=func.now())
 
-    ad_campaign = relationship("AdCampaign")
+    campaign = relationship("Campaign")
 
     def __repr__(self):
         return f"<SMSCampaign(segment='{self.segment}')>"
@@ -143,9 +152,9 @@ class Customer(Base):
     room_preference = Column(String(100), nullable=True)
     dietary_requirements = Column(Text, nullable=True)
     is_loyalty_member = Column(Boolean, default=False)
-    origin_ad_campaign_id = Column(String, ForeignKey("ad_campaigns.id"), nullable=True)
+    origin_campaign_id = Column(String, ForeignKey("campaigns.id"), nullable=True)
 
-    origin_campaign = relationship("AdCampaign")
+    origin_campaign = relationship("Campaign")
     sms_history = relationship("SMSSent", backref="customer")
 
     def __repr__(self):

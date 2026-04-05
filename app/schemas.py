@@ -78,29 +78,71 @@ class EventSearchResponse(BaseModel):
     events: list[EventResponse]
     meta: dict
 
-class AdCampaignResponse(BaseModel):
+class CampaignAdResponse(BaseModel):
     id: str
-    event_id: str
-    headline: Optional[str]
-    body_text: Optional[str]
-    generated_image_url: Optional[str]
-    target_audience: Optional[dict]
-    ai_rationale: Optional[str]
+    campaignId: str
+    purpose: str
+    channel: str
+    title: Optional[str]
+    message: str
     status: str
-    created_at: datetime
+    budget: Optional[float]
+    leadsCaptured: Optional[int]
+    sentCount: Optional[int]
+    targetAudience: Optional[dict]
+    aiRationale: Optional[str]
+    imagePrompt: Optional[str]
+    imageUrl: Optional[str]
 
     class Config:
         from_attributes = True
 
-
-class AdTemplateResponse(BaseModel):
+class CampaignResponse(BaseModel):
     id: str
-    campaign_id: str
-    primary_text: str
-    headline: str
-    image_prompt: Optional[str]
-    image_url: Optional[str]
-    meta_form_id: Optional[str]
+    name: str
+    goal: str
+    purpose: str
+    startDate: str
+    endDate: str
+    status: str
+    eventId: Optional[str]
+    target: Optional[dict]
+    ads: list[CampaignAdResponse]
+    created_at: datetime
+
+    @classmethod
+    def from_orm(cls, campaign) -> "CampaignResponse":
+        return cls(
+            id=campaign.id,
+            name=campaign.name,
+            goal=campaign.goal,
+            purpose=campaign.purpose,
+            startDate=campaign.start_date,
+            endDate=campaign.end_date,
+            status=campaign.status,
+            eventId=campaign.event_id,
+            target=campaign.target,
+            ads=[
+                CampaignAdResponse(
+                    id=ad.id,
+                    campaignId=ad.campaign_id,
+                    purpose=ad.purpose,
+                    channel=ad.channel,
+                    title=ad.title,
+                    message=ad.message,
+                    status=ad.status,
+                    budget=ad.budget,
+                    leadsCaptured=ad.leads_captured,
+                    sentCount=ad.sent_count,
+                    targetAudience=ad.target_audience,
+                    aiRationale=ad.ai_rationale,
+                    imagePrompt=ad.image_prompt,
+                    imageUrl=ad.image_url
+                )
+                for ad in campaign.ads
+            ],
+            created_at=campaign.created_at
+        )
 
     class Config:
         from_attributes = True
@@ -119,7 +161,7 @@ class SMSTemplateResponse(BaseModel):
 class SMSCampaignResponse(BaseModel):
     id: str
     customer_id: Optional[str]
-    ad_campaign_id: Optional[str]
+    campaign_id: Optional[str]
     segment: str
     message_body: str
     discount_code: Optional[str]

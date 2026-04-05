@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from .db import get_db
-from .models import User, Event, AdCampaign, Customer, SMSCampaign
-from .schemas import SignIn, Token, EventSearchRequest, EventResponse, AdCampaignResponse, AdTemplateResponse, SMSCampaignResponse, SMSTemplateResponse
+from .models import User, Event, Campaign, Customer, SMSCampaign
+from .schemas import SignIn, Token, EventSearchRequest, EventResponse, CampaignResponse, SMSCampaignResponse, SMSTemplateResponse
 from .auth import verify_password, create_access_token
-from .service import search_and_save_events, generate_campaigns_for_event, generate_ad_template, generate_sms_template_existing, generate_sms_template_lead, bulk_send_sms
+from .service import search_and_save_events, generate_campaign_for_event, generate_sms_template_existing, generate_sms_template_lead, bulk_send_sms
 import csv
 import io
 from datetime import date
@@ -31,25 +31,28 @@ def search_events(request: EventSearchRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error searching events: {str(e)}")
 
-@router.post("/events/{event_id}/campaigns", response_model=list[AdCampaignResponse])
-def generate_campaigns(event_id: str, db: Session = Depends(get_db)):
+@router.post("/events/{event_id}/campaign")
+def generate_campaign(event_id: str, db: Session = Depends(get_db)):
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
     try:
-        return generate_campaigns_for_event(event, db)
+        campaign = generate_campaign_for_event(event, db)
+        return CampaignResponse.from_orm(campaign)
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating campaigns: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating campaign: {str(e)}")
 
-@router.post("/campaigns/{campaign_id}/templates", response_model=AdTemplateResponse)
-def generate_template(campaign_id: str, db: Session = Depends(get_db)):
-    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+@router.get("/campaigns")
+def list_campaigns(db: Session = Depends(get_db)):
+    campaigns = db.query(Campaign).order_by(Campaign.created_at.desc()).all()
+    return [CampaignResponse.from_orm(c) for c in campaigns]
+
+@router.get("/campaigns/{campaign_id}")
+def get_campaign(campaign_id: str, db: Session = Depends(get_db)):
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
     if not campaign:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
-    try:
-        return generate_ad_template(campaign, db)
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating template: {str(e)}")
+    return CampaignResponse.from_orm(campaign)
 
 @router.post("/sms-templates/existing", response_model=SMSTemplateResponse)
 def create_sms_template_existing(db: Session = Depends(get_db)):
@@ -66,7 +69,7 @@ def create_sms_template_lead(db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error generating SMS template: {str(e)}")
 
 @router.post("/sms-templates/{template_id}/send")
-def send_bulk_sms(template_id: str, db: Session = Depends(get_db)):
+def send_bulk_sms_endpoint(template_id: str, db: Session = Depends(get_db)):
     template = db.query(SMSCampaign).filter(SMSCampaign.id == template_id).first()
     if not template:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SMS template not found")
@@ -93,7 +96,7 @@ def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
             dob_raw = row.get("date_of_birth", "").strip()
             dob = date.fromisoformat(dob_raw) if dob_raw else None
             is_loyalty = row.get("is_loyalty_member", "False").strip().lower() in ("true", "1", "yes")
-            campaign_id = row.get("origin_ad_campaign_id", "").strip() or None
+            campaign_id = row.get("origin_campaign_id", "").strip() or None
 
             existing = db.query(Customer).filter(Customer.id == row["id"]).first()
             if existing:
@@ -106,7 +109,7 @@ def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
                 existing.room_preference = row.get("room_preference") or None
                 existing.dietary_requirements = row.get("dietary_requirements") or None
                 existing.is_loyalty_member = is_loyalty
-                existing.origin_ad_campaign_id = campaign_id
+                existing.origin_campaign_id = campaign_id
                 updated += 1
             else:
                 db.add(Customer(
@@ -120,7 +123,7 @@ def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
                     room_preference=row.get("room_preference") or None,
                     dietary_requirements=row.get("dietary_requirements") or None,
                     is_loyalty_member=is_loyalty,
-                    origin_ad_campaign_id=campaign_id
+                    origin_campaign_id=campaign_id
                 ))
                 created += 1
         except Exception as e:

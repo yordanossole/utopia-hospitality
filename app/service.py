@@ -7,7 +7,7 @@ import json
 import os
 import logging
 import uuid
-from .models import Event, AdCampaign, AdTemplate, SMSCampaign, SMSSent, Customer, UserSegment
+from .models import Event, Campaign, CampaignAd, SMSCampaign, SMSSent, Customer, UserSegment
 from .schemas import EventSearchRequest
 
 logger = logging.getLogger(__name__)
@@ -289,10 +289,17 @@ def search_and_save_events(request: EventSearchRequest, db: Session) -> dict:
 
 # ─── Campaign generator ───────────────────────────────────────────────────────
 
-def generate_campaigns_for_event(event: Event, db: Session) -> list[AdCampaign]:
-    """Use Groq to generate ad campaign ideas for an event"""
+def generate_campaign_for_event(event: Event, db: Session) -> Campaign:
+    """Generate a complete campaign with multi-channel ads for an event"""
+    
+    # Check if campaign already exists for this event
+    existing = db.query(Campaign).filter(Campaign.event_id == event.id).first()
+    if existing:
+        logger.info(f"Event {event.id} already has campaign, returning existing")
+        return existing
 
-    prompt = f"""You are a hospitality marketing expert. Generate 3 distinct Meta ad campaign ideas for the following event.
+    # Generate Meta ad creative using AI
+    prompt = f"""You are a hospitality marketing expert. Generate ONE Meta ad campaign for this event.
 
 Event:
 - Name: {event.name}
@@ -302,81 +309,28 @@ Event:
 - Start: {event.start_date or 'N/A'}
 - Demand Level: {event.demand_level or 'N/A'}
 - Traveler Type: {event.traveler_type or 'N/A'}
+- Suggested Audience: {event.suggested_audience or 'N/A'}
 
-Return a JSON array of exactly 3 campaigns:
-[{{
-  "headline": "short punchy headline (max 200 chars)",
-  "body_text": "ad body copy that creates urgency",
-  "target_audience": {{"age_range": "...", "interests": [...], "location": "..."}},
-  "ai_rationale": "why this campaign angle works"
-}}]
-
-Return ONLY valid JSON array, no markdown."""
-
-    response = get_groq_client().chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
-        max_tokens=2000
-    )
-
-    content = response.choices[0].message.content.strip()
-    if content.startswith("```"):
-        content = content.split("```")[1]
-        if content.startswith("json"):
-            content = content[4:]
-
-    campaigns_data = json.loads(content)
-
-    campaigns = [
-        AdCampaign(
-            event_id=event.id,
-            headline=c.get("headline"),
-            body_text=c.get("body_text"),
-            target_audience=c.get("target_audience"),
-            ai_rationale=c.get("ai_rationale"),
-            status="draft"
-        )
-        for c in campaigns_data
-    ]
-
-    db.add_all(campaigns)
-    db.commit()
-    for c in campaigns:
-        db.refresh(c)
-    return campaigns
-
-
-def generate_ad_template(campaign: AdCampaign, db: Session) -> AdTemplate:
-    event = campaign.event
-    prompt = f"""You are a Meta Ads creative specialist for a hospitality brand. Generate one high-converting ad template for the following campaign.
-
-Event:
-- Name: {event.name}
-- Description: {event.description or 'N/A'}
-- Start: {event.start_date or 'N/A'}
-
-Campaign:
-- Headline: {campaign.headline}
-- Body: {campaign.body_text}
-- Target Audience: {json.dumps(campaign.target_audience)}
-
-Return a single JSON object with this exact structure:
+Return a JSON object:
 {{
-  "primary_text": "the hook text shown above the image (2-3 sentences, creates desire)",
-  "headline": "bold offer line shown next to the CTA button (max 255 chars)",
-  "image_prompt": "detailed prompt for an AI image generator describing the ideal ad visual",
-  "meta_form_id": null
+  "campaign_name": "short campaign name",
+  "meta_ad": {{
+    "title": "ad headline (max 200 chars)",
+    "message": "ad body copy that creates urgency",
+    "target_audience": {{"age_range": "...", "interests": [...], "location": "..."}},
+    "image_prompt": "detailed prompt for AI image generator"
+  }}
 }}
 
-Return ONLY valid JSON, no markdown or explanation."""
+Return ONLY valid JSON, no markdown."""
 
     response = get_groq_client().chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
-        max_tokens=1000
+        max_tokens=1500
     )
+
     content = response.choices[0].message.content.strip()
     if content.startswith("```"):
         content = content.split("```")[1]
@@ -384,18 +338,63 @@ Return ONLY valid JSON, no markdown or explanation."""
             content = content[4:]
     data = json.loads(content)
 
-    template = AdTemplate(
-        campaign_id=campaign.id,
-        primary_text=data["primary_text"],
-        headline=data["headline"],
-        image_prompt=data.get("image_prompt"),
-        image_url=data.get("image_url"),
-        meta_form_id=data.get("meta_form_id")
+    # Create campaign
+    campaign = Campaign(
+        name=data.get("campaign_name", f"{event.name} Campaign"),
+        goal="bookings",
+        purpose="both",  # both activation and acquisition
+        start_date=event.start_date,
+        end_date=event.end_date,
+        status="draft",
+        event_id=event.id,
+        target={"source": ["pms", "website", "meta"]}
     )
-    db.add(template)
+    db.add(campaign)
+    db.flush()  # Get campaign.id
+
+    # Create Meta ad (acquisition)
+    meta_ad_data = data.get("meta_ad", {})
+    meta_ad = CampaignAd(
+        campaign_id=campaign.id,
+        purpose="acquisition",
+        channel="meta",
+        title=meta_ad_data.get("title"),
+        message=meta_ad_data.get("message"),
+        status="draft",
+        target_audience=meta_ad_data.get("target_audience"),
+        image_prompt=meta_ad_data.get("image_prompt"),
+        budget=1000.0  # default budget
+    )
+    db.add(meta_ad)
+
+    # Auto-generate SMS ad (activation) from Meta ad
+    sms_message = f"Hi {{{{name}}}}, {meta_ad_data.get('title', event.name)}. Book now!"
+    sms_ad = CampaignAd(
+        campaign_id=campaign.id,
+        purpose="activation",
+        channel="sms",
+        message=sms_message[:160],
+        status="draft"
+    )
+    db.add(sms_ad)
+
+    # Auto-generate Email ad (activation) from Meta ad
+    email_ad = CampaignAd(
+        campaign_id=campaign.id,
+        purpose="activation",
+        channel="email",
+        title=meta_ad_data.get("title"),
+        message=f"Dear {{{{name}}}},\n\n{meta_ad_data.get('message')}\n\nBook your stay today!",
+        status="draft"
+    )
+    db.add(email_ad)
+
     db.commit()
-    db.refresh(template)
-    return template
+    db.refresh(campaign)
+    
+    logger.info(f"Generated campaign {campaign.id} with {len(campaign.ads)} ads for event {event.id}")
+    return campaign
+
 
 def generate_sms_template_existing(db: Session) -> SMSCampaign:
     prompt = """You are a hospitality CRM specialist. Write a base SMS template for returning/existing customers.
@@ -474,9 +473,9 @@ Return ONLY valid JSON, no markdown or explanation."""
 
 def bulk_send_sms(template: SMSCampaign, db: Session) -> dict:
     segment_filter = (
-        Customer.origin_ad_campaign_id.isnot(None)
+        Customer.origin_campaign_id.isnot(None)
         if template.segment == UserSegment.NEW_LEAD
-        else Customer.origin_ad_campaign_id.is_(None)
+        else Customer.origin_campaign_id.is_(None)
     )
     customers = db.query(Customer).filter(segment_filter).all()
 
