@@ -1,0 +1,6 @@
+id,first_name,last_name,email,phone_number,date_of_birth,nationality,room_preference,dietary_requirements,is_loyalty_member,origin_ad_campaign_id
+550e8400-e29b-41d4-a716-446655440000,Julian,Casablancas,julian@example.com,+1-555-0101,1978-08-23,American,Penthouse Suite,Gluten-free,True,camp-99
+7c9e6679-7425-40de-944b-e07fc1f90ae7,Amelie,Poulain,amelie@montmartre.fr,+33-1-42-55,1985-06-12,French,Garden View,None,False,camp-42
+f47ac10b-58cc-4372-a567-0e02b2c3d479,Sato,Kenji,sato.k@domain.jp,+81-90-1234,1992-11-30,Japanese,High Floor,Shellfish allergy,True,camp-101
+d290f1ee-6c54-4b01-90e6-d701748f0851,Elena,Rodriguez,,+34-912-345-678,1980-02-15,Spanish,Twin Bed,Vegan,False,
+b8f32115-4673-4f92-9112-78d1f274a123,David,Chen,dchen88@provider.com,+65-6123-4567,,Singaporean,Quiet Zone,,True,camp-99
