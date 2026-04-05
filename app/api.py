@@ -18,14 +18,16 @@ def sign_in(credentials: SignIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
     return {"access_token": create_access_token(data={"sub": user.email}), "token_type": "bearer"}
 
-@router.get("/events", response_model=list[EventResponse])
+@router.get("/events")
 def list_events(db: Session = Depends(get_db)):
-    return db.query(Event).order_by(Event.created_at.desc()).all()
+    events = db.query(Event).order_by(Event.created_at.desc()).all()
+    return [EventResponse.from_orm_event(e) for e in events]
 
-@router.post("/search-events", response_model=list[EventResponse])
+@router.post("/search-events")
 def search_events(request: EventSearchRequest, db: Session = Depends(get_db)):
     try:
-        return search_and_save_events(request.days, db)
+        result = search_and_save_events(request, db)
+        return result
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error searching events: {str(e)}")
 
