@@ -7,7 +7,7 @@ import json
 import os
 import logging
 import uuid
-from .models import Event, AdCampaign
+from .models import Event, AdCampaign, AdTemplate, SMSCampaign, SMSSent, Customer, UserSegment
 from .schemas import EventSearchRequest
 
 logger = logging.getLogger(__name__)
