@@ -1,151 +1,314 @@
-from serpapi import GoogleSearch
+from google import genai
+from google.genai import types
 from groq import Groq
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta, timezone
-from dateutil.parser import parse as parse_date
+from datetime import datetime, timedelta
 import json
 import os
-from .models import Event, AdCampaign, AdTemplate, SMSCampaign, SMSSent, Customer, UserSegment
+import logging
+import uuid
+from .models import Event, AdCampaign
+from .schemas import EventSearchRequest
 
-HOTEL_LOCATION = "New york city, USA"
+logger = logging.getLogger(__name__)
 
-groq_client = None
+VALID_CATEGORIES = ["religious", "conference", "festival", "diaspora", "education", "trade", "arts", "sports", "music"]
 
-def get_groq_client():
-    global groq_client
-    if groq_client is None:
+TIMEFRAME_DAYS = {
+    "2_weeks": 14,
+    "1_month": 30,
+    "3_months": 90,
+}
+
+# ─── Lazy clients ────────────────────────────────────────────────────────────
+
+_gemini_client = None
+_groq_client = None
+
+def get_gemini_client() -> genai.Client:
+    global _gemini_client
+    if _gemini_client is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is required")
+        _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
+
+def get_groq_client() -> Groq:
+    global _groq_client
+    if _groq_client is None:
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             raise ValueError("GROQ_API_KEY environment variable is required")
-        groq_client = Groq(api_key=api_key)
-    return groq_client
+        _groq_client = Groq(api_key=api_key)
+    return _groq_client
 
-def _parse_groq_json(content: str):
-    content = content.strip()
+# ─── Timeframe resolver ───────────────────────────────────────────────────────
+
+def resolve_timeframe(request: EventSearchRequest) -> tuple[str, str]:
+    """Convert timeframe to start_date and end_date strings"""
+    start = datetime.utcnow().date()
+    days = request.custom_days if request.timeframe == "custom" else TIMEFRAME_DAYS[request.timeframe]
+    end = start + timedelta(days=days)
+    return str(start), str(end)
+
+# ─── Gemini search agent ──────────────────────────────────────────────────────
+
+# Minimum demand levels worth saving (filter out noise)
+MIN_DEMAND_LEVELS = {"extreme", "high", "medium"}
+
+def search_events_with_gemini(categories: list[str], start_date: str, end_date: str) -> str:
+    """Use Gemini with Google Search grounding to find real events in Ethiopia"""
+
+    categories_str = ", ".join(categories)
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    prompt = f"""You are an expert event research agent for the hospitality industry in Ethiopia.
+Today's date is {today}. Search the web and find real, confirmed events happening in Ethiopia between {start_date} and {end_date}.
+
+Focus ONLY on high-impact events relevant to hotel demand in these categories: {categories_str}
+
+IMPORTANT - Only include events that meet at least ONE of these criteria:
+- Expected attendance over 5,000 people
+- International delegates or diaspora travelers
+- Government or UN-level summits
+- Major religious holidays with nationwide observance
+- Trade fairs, expos, or large cultural festivals
+
+DO NOT include small academic workshops, minor local seminars, or niche professional conferences with under 500 attendees.
+
+For each event you find, extract:
+- Full event name
+- Exact category (must be one of: {categories_str})
+- Start and end dates (YYYY-MM-DD format)
+- Whether it recurs yearly or is variable
+- All venue details: name, city, approximate lat/lng, estimated capacity, primary or secondary importance
+- Who attends: local, international, diaspora, or business travelers
+- Demand impact level: extreme (500k+ attendance or major international), high (50k-500k or significant), medium (5k-50k), low (under 5k)
+- Estimated lead time in days hotels should prepare in advance
+- Impact radius in km around the venue
+- Hotel campaign strategy: which of these fit (discount, package, event-based, corporate, long-stay)
+- Suggested hotel target audience
+
+Be thorough. Search for religious holidays, government summits, trade fairs, cultural festivals, music concerts, sports events, art exhibitions, university events, and diaspora gatherings.
+
+Return ONLY a valid JSON array with this exact structure per event:
+[
+  {{
+    "name": "event name",
+    "slug": "url-friendly-slug",
+    "category": "one of the valid categories",
+    "startDate": "YYYY-MM-DD",
+    "endDate": "YYYY-MM-DD",
+    "recurrence": "yearly or variable",
+    "locations": {{
+      "country": "Ethiopia",
+      "venues": [
+        {{
+          "name": "venue name",
+          "city": "city name",
+          "lat": 0.0,
+          "lng": 0.0,
+          "capacity": 0,
+          "importance": "primary or secondary"
+        }}
+      ]
+    }},
+    "demandImpact": {{
+      "level": "extreme or high or medium or low",
+      "travelerType": ["local", "international", "diaspora", "business"]
+    }},
+    "leadTimeDays": 30,
+    "impactRadiusKm": 20,
+    "timezone": "Africa/Addis_Ababa",
+    "description": "brief description",
+    "hotelStrategy": {{
+      "campaignType": ["event-based"],
+      "suggestedAudience": ["tourists", "diaspora"]
+    }},
+    "sourceUrl": "url where you found this event"
+  }}
+]
+
+Return ONLY the JSON array. No markdown, no explanation."""
+
+    response = get_gemini_client().models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.1,
+            max_output_tokens=8000,
+        )
+    )
+
+    return response.text
+
+# ─── Parse Gemini response ────────────────────────────────────────────────────
+
+def parse_gemini_response(raw: str) -> list[dict]:
+    """Safely parse Gemini JSON response"""
+    content = raw.strip()
+    
+    logger.info(f"Parsing Gemini response ({len(content)} chars)")
+    logger.info(f"First 200 chars: {content[:200]}")
+    logger.info(f"Last 200 chars: {content[-200:]}")
+
+    # Strip markdown code blocks if present
     if content.startswith("```"):
         content = content.split("```")[1]
         if content.startswith("json"):
             content = content[4:]
-    return json.loads(content)
+        content = content.strip()
 
-def search_events_from_web(days: int) -> dict:
-    today = datetime.now()
-    end_date = today + timedelta(days=days)
-    query = f"events in {HOTEL_LOCATION} from {today.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
-    search = GoogleSearch({
-        "engine": "google_events",
-        "q": query,
-        "api_key": os.getenv("SERPAPI_KEY")
-    })
-    return search.get_dict()
+    # Find JSON array boundaries
+    start = content.find("[")
+    end = content.rfind("]") + 1
+    
+    if start == -1 or end == 0:
+        logger.error(f"No JSON array found. Full response: {content[:1000]}")
+        return []
 
-def structure_with_ai(raw_results: dict) -> list[dict]:
-    raw_events = raw_results.get("events_results", [])[:10]
-    events_data = [
-        {
-            "title": e.get("title"),
-            "description": e.get("description", "")[:300],
-            "date": e.get("date"),
-            "address": e.get("address"),
-            "link": e.get("link"),
-        }
-        for e in raw_events
-    ]
-    prompt = f"""Extract and structure event information from the following Google Events data.
-Return a JSON array of events with this exact structure:
-{{
-  "title": "event title",
-  "description": "event description",
-  "category": "category (e.g., concert, sports, tech, conference)",
-  "start_time": "ISO 8601 datetime or null",
-  "end_time": "ISO 8601 datetime or null",
-  "location_name": "location",
-  "source_url": "original URL"
-}}
-
-Google Events Data:
-{json.dumps(events_data, indent=2)}
-
-Return ONLY valid JSON array, no markdown or explanation."""
-
-    response = get_groq_client().chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.1,
-        max_tokens=4000
-    )
-    return _parse_groq_json(response.choices[0].message.content)
-
-def _parse_dt(value: str | None):
-    if not value:
-        return None
     try:
-        return parse_date(value).astimezone(timezone.utc).replace(tzinfo=None)
-    except Exception:
-        return None
+        return json.loads(content[start:end])
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parse error: {e}")
+        logger.error(f"Raw content around error: {content[max(0, e.pos-100):e.pos+100]}")
+        # Try to salvage partial results
+        try:
+            # Find last complete object before error
+            last_complete = content[:e.pos].rfind('},')
+            if last_complete > 0:
+                partial = content[start:last_complete+1] + "]"  # Close array
+                logger.info("Attempting to parse partial results")
+                return json.loads(partial)
+        except:
+            pass
+        return []
 
-def save_events_to_db(events: list[dict], raw_api_data: dict, db: Session) -> list[Event]:
-    saved_events = []
-    for event_data in events:
-        existing = db.query(Event).filter(
-            Event.title == event_data.get("title"),
-            Event.location_name == event_data.get("location_name"),
-            Event.start_time == event_data.get("start_time")
-        ).first()
+# ─── Save to DB ───────────────────────────────────────────────────────────────
+
+def save_events_to_db(events: list[dict], db: Session) -> list[Event]:
+    """Save events with deduplication by slug"""
+    saved = []
+
+    for data in events:
+        slug = data.get("slug") or data["name"].lower().replace(" ", "-")
+
+        existing = db.query(Event).filter(Event.slug == slug).first()
 
         if existing:
-            existing.description = event_data.get("description")
-            existing.category = event_data.get("category")
-            existing.end_time = _parse_dt(event_data.get("end_time"))
-            existing.source_url = event_data.get("source_url")
-            existing.raw_api_data = raw_api_data
-            existing.ai_structured_data = event_data
+            existing.name = data.get("name")
+            existing.description = data.get("description")
+            existing.category = data.get("category")
+            existing.start_date = data.get("startDate")
+            existing.end_date = data.get("endDate")
+            existing.recurrence = data.get("recurrence")
+            existing.venues = data.get("locations", {}).get("venues", [])
+            existing.demand_level = data.get("demandImpact", {}).get("level")
+            existing.traveler_type = data.get("demandImpact", {}).get("travelerType", [])
+            existing.lead_time_days = data.get("leadTimeDays")
+            existing.impact_radius_km = data.get("impactRadiusKm")
+            existing.timezone = data.get("timezone", "Africa/Addis_Ababa")
+            existing.campaign_type = data.get("hotelStrategy", {}).get("campaignType", [])
+            existing.suggested_audience = data.get("hotelStrategy", {}).get("suggestedAudience", [])
+            existing.source_url = data.get("sourceUrl")
             existing.last_seen_at = datetime.utcnow()
-            saved_events.append(existing)
+            saved.append(existing)
         else:
-            new_event = Event(
-                title=event_data.get("title"),
-                description=event_data.get("description"),
-                category=event_data.get("category"),
-                start_time=_parse_dt(event_data.get("start_time")),
-                end_time=_parse_dt(event_data.get("end_time")),
-                location_name=event_data.get("location_name"),
-                source_url=event_data.get("source_url"),
-                raw_api_data=raw_api_data,
-                ai_structured_data=event_data
+            event = Event(
+                id=str(uuid.uuid4()),
+                slug=slug,
+                name=data.get("name"),
+                description=data.get("description"),
+                category=data.get("category"),
+                start_date=data.get("startDate"),
+                end_date=data.get("endDate"),
+                recurrence=data.get("recurrence"),
+                country="Ethiopia",
+                venues=data.get("locations", {}).get("venues", []),
+                demand_level=data.get("demandImpact", {}).get("level"),
+                traveler_type=data.get("demandImpact", {}).get("travelerType", []),
+                lead_time_days=data.get("leadTimeDays"),
+                impact_radius_km=data.get("impactRadiusKm"),
+                timezone=data.get("timezone", "Africa/Addis_Ababa"),
+                campaign_type=data.get("hotelStrategy", {}).get("campaignType", []),
+                suggested_audience=data.get("hotelStrategy", {}).get("suggestedAudience", []),
+                source_url=data.get("sourceUrl"),
             )
-            db.add(new_event)
-            saved_events.append(new_event)
+            db.add(event)
+            saved.append(event)
 
     db.commit()
-    for e in saved_events:
+    # Refresh all to load DB-generated fields like created_at
+    for e in saved:
         db.refresh(e)
-    return saved_events
+    return saved
 
-def search_and_save_events(days: int, db: Session) -> list[Event]:
-    raw_results = search_events_from_web(days)
-    structured_events = structure_with_ai(raw_results)
-    return save_events_to_db(structured_events, raw_results, db)
+# ─── Main orchestrator ────────────────────────────────────────────────────────
+
+def search_and_save_events(request: EventSearchRequest, db: Session) -> dict:
+    """Main agent: resolve timeframe → search with Gemini → save → return"""
+
+    start_date, end_date = resolve_timeframe(request)
+    categories = request.categories or VALID_CATEGORIES
+
+    logger.info(f"Agent searching {len(categories)} categories in Ethiopia from {start_date} to {end_date}")
+
+    raw = search_events_with_gemini(categories, start_date, end_date)
+    logger.info(f"Raw Gemini response length: {len(raw)} chars")
+    logger.debug(f"First 500 chars: {raw[:500]}")
+    
+    events_data = parse_gemini_response(raw)
+
+    logger.info(f"Gemini found {len(events_data)} events")
+
+    # Filter out low demand events - not useful for hotel strategy
+    before_filter = len(events_data)
+    events_data = [
+        e for e in events_data
+        if e.get("demandImpact", {}).get("level") in MIN_DEMAND_LEVELS
+    ]
+    logger.info(f"Demand filter: {before_filter} → {len(events_data)} events (removed {before_filter - len(events_data)} low-demand)")
+
+    saved = save_events_to_db(events_data, db)
+
+    return {
+        "events": saved,
+        "meta": {
+            "total": len(saved),
+            "start_date": start_date,
+            "end_date": end_date,
+            "categories_searched": categories,
+            "fetched_at": datetime.utcnow().isoformat() + "Z"
+        }
+    }
+
+# ─── Campaign generator ───────────────────────────────────────────────────────
 
 def generate_campaigns_for_event(event: Event, db: Session) -> list[AdCampaign]:
+    """Use Groq to generate ad campaign ideas for an event"""
+
     prompt = f"""You are a hospitality marketing expert. Generate 3 distinct Meta ad campaign ideas for the following event.
 
 Event:
-- Title: {event.title}
+- Name: {event.name}
 - Description: {event.description or 'N/A'}
 - Category: {event.category or 'N/A'}
-- Location: {event.location_name or 'N/A'}
-- Start: {event.start_time or 'N/A'}
+- Location: Ethiopia
+- Start: {event.start_date or 'N/A'}
+- Demand Level: {event.demand_level or 'N/A'}
+- Traveler Type: {event.traveler_type or 'N/A'}
 
-Return a JSON array of exactly 3 campaigns with this structure:
-{{
+Return a JSON array of exactly 3 campaigns:
+[{{
   "headline": "short punchy headline (max 200 chars)",
   "body_text": "ad body copy that creates urgency",
   "target_audience": {{"age_range": "...", "interests": [...], "location": "..."}},
   "ai_rationale": "why this campaign angle works"
-}}
+}}]
 
-Return ONLY valid JSON array, no markdown or explanation."""
+Return ONLY valid JSON array, no markdown."""
 
     response = get_groq_client().chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -153,7 +316,14 @@ Return ONLY valid JSON array, no markdown or explanation."""
         temperature=0.7,
         max_tokens=2000
     )
-    campaigns_data = _parse_groq_json(response.choices[0].message.content)
+
+    content = response.choices[0].message.content.strip()
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+
+    campaigns_data = json.loads(content)
 
     campaigns = [
         AdCampaign(
@@ -166,21 +336,22 @@ Return ONLY valid JSON array, no markdown or explanation."""
         )
         for c in campaigns_data
     ]
+
     db.add_all(campaigns)
     db.commit()
     for c in campaigns:
         db.refresh(c)
     return campaigns
 
+
 def generate_ad_template(campaign: AdCampaign, db: Session) -> AdTemplate:
     event = campaign.event
     prompt = f"""You are a Meta Ads creative specialist for a hospitality brand. Generate one high-converting ad template for the following campaign.
 
 Event:
-- Title: {event.title}
+- Name: {event.name}
 - Description: {event.description or 'N/A'}
-- Location: {event.location_name or 'N/A'}
-- Start: {event.start_time or 'N/A'}
+- Start: {event.start_date or 'N/A'}
 
 Campaign:
 - Headline: {campaign.headline}
@@ -203,7 +374,12 @@ Return ONLY valid JSON, no markdown or explanation."""
         temperature=0.7,
         max_tokens=1000
     )
-    data = _parse_groq_json(response.choices[0].message.content)
+    content = response.choices[0].message.content.strip()
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+    data = json.loads(content)
 
     template = AdTemplate(
         campaign_id=campaign.id,
@@ -217,7 +393,6 @@ Return ONLY valid JSON, no markdown or explanation."""
     db.commit()
     db.refresh(template)
     return template
-
 
 def generate_sms_template_existing(db: Session) -> SMSCampaign:
     prompt = """You are a hospitality CRM specialist. Write a base SMS template for returning/existing customers.
@@ -239,7 +414,12 @@ Return ONLY valid JSON, no markdown or explanation."""
         temperature=0.7,
         max_tokens=300
     )
-    data = _parse_groq_json(response.choices[0].message.content)
+    content = response.choices[0].message.content.strip()
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+    data = json.loads(content)
 
     template = SMSCampaign(
         segment=UserSegment.EXISTING_CUSTOMER,
@@ -251,7 +431,6 @@ Return ONLY valid JSON, no markdown or explanation."""
     db.commit()
     db.refresh(template)
     return template
-
 
 def generate_sms_template_lead(db: Session) -> SMSCampaign:
     prompt = """You are a hospitality sales specialist. Write a base SMS template for new leads captured from Meta Ads.
@@ -272,7 +451,12 @@ Return ONLY valid JSON, no markdown or explanation."""
         temperature=0.7,
         max_tokens=300
     )
-    data = _parse_groq_json(response.choices[0].message.content)
+    content = response.choices[0].message.content.strip()
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+    data = json.loads(content)
 
     template = SMSCampaign(
         segment=UserSegment.NEW_LEAD,
@@ -284,7 +468,6 @@ Return ONLY valid JSON, no markdown or explanation."""
     db.commit()
     db.refresh(template)
     return template
-
 
 def bulk_send_sms(template: SMSCampaign, db: Session) -> dict:
     segment_filter = (
