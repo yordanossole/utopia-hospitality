@@ -19,5 +19,5 @@ pydantic-settings==2.6.0
 python-multipart==0.0.12
 
 # AI Services
-google-search-results==2.4.2
+google-genai>=1.70.0
 groq==0.11.0

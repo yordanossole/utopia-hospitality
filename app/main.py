@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+from dotenv import load_dotenv
+load_dotenv()
 from .db import engine, Base
 from .api import router
 
