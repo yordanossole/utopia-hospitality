@@ -273,8 +273,11 @@ def search_and_save_events(request: EventSearchRequest, db: Session) -> dict:
 
     saved = save_events_to_db(events_data, db)
 
+    from .schemas import EventResponse
+    serialized_events = [EventResponse.from_orm_event(e) for e in saved]
+
     return {
-        "events": saved,
+        "events": serialized_events,
         "meta": {
             "total": len(saved),
             "start_date": start_date,
