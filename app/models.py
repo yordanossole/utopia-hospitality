@@ -2,7 +2,6 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .db import Base
-from datetime import datetime
 import uuid
 import enum
 
@@ -17,28 +16,41 @@ class Event(Base):
     __tablename__ = "events"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    title = Column(String(255), nullable=False)
+    slug = Column(String(255), unique=True)
+    name = Column(String(255), nullable=False)
     description = Column(Text)
     category = Column(String(100))
-    start_time = Column(DateTime)
-    end_time = Column(DateTime)
-    location_name = Column(String(255))
-    
-    # AI Metadata
+
+    start_date = Column(String(20))  # ISO date string
+    end_date = Column(String(20))    # ISO date string
+    recurrence = Column(String(20))  # yearly | variable
+
+    # Location
+    country = Column(String(100), default="Ethiopia")
+    venues = Column(JSON)            # list of venue objects
+
+    # Demand & Impact
+    demand_level = Column(String(20))   # extreme | high | medium | low
+    traveler_type = Column(JSON)        # list of traveler types
+    lead_time_days = Column(Integer)
+    impact_radius_km = Column(Float)
+    timezone = Column(String(100), default="Africa/Addis_Ababa")
+
+    # Hotel Strategy
+    campaign_type = Column(JSON)        # list of campaign types
+    suggested_audience = Column(JSON)   # list of audience strings
+
+    # Meta
     source_url = Column(String)
     raw_api_data = Column(JSON)
-    ai_structured_data = Column(JSON)
-    
-    # Tracking
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
     last_seen_at = Column(DateTime, server_default=func.now())
-    
-    # Relationships
+
     campaigns = relationship("AdCampaign", back_populates="event", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<Event(title='{self.title}', category='{self.category}')>"
+        return f"<Event(name='{self.name}', category='{self.category}')>"
 
 class AdCampaign(Base):
     __tablename__ = "ad_campaigns"
@@ -109,7 +121,7 @@ class SMSSent(Base):
     sms_campaign_id = Column(String, ForeignKey("sms_campaigns.id"), nullable=False)
     customer_id = Column(String, ForeignKey("customers.id"), nullable=False)
     message_body = Column(String(160), nullable=False)
-    sent_at = Column(DateTime, default=datetime.utcnow)
+    sent_at = Column(DateTime)
     is_delivered = Column(Boolean, default=False)
 
     campaign = relationship("SMSCampaign")
